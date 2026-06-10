@@ -2,6 +2,7 @@ const express = require('express')
 const bodyParser = require('body-parser')
 const cors = require('cors')
 const sqlite3 = require('sqlite3').verbose()
+const path = require('path')
 
 const app = express()
 const port = process.env.PORT || 3002
@@ -9,12 +10,20 @@ const port = process.env.PORT || 3002
 app.use(cors())
 app.use(bodyParser.json())
 
-// 创建/连接 SQLite 数据库
-const db = new sqlite3.Database(':memory:', (err) => {
+// 创建/连接 SQLite 文件数据库
+const dbPath = path.join(__dirname, 'data', 'life-assistant.db')
+
+// 确保数据目录存在
+const fs = require('fs')
+if (!fs.existsSync(path.dirname(dbPath))) {
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true })
+}
+
+const db = new sqlite3.Database(dbPath, (err) => {
   if (err) {
     console.error('Error opening database:', err)
   } else {
-    console.log('Connected to SQLite database')
+    console.log('Connected to SQLite database at:', dbPath)
     initDatabase()
   }
 })
@@ -51,10 +60,8 @@ app.post('/family/create', (req, res) => {
 
   // 生成5位邀请码
   const code = Math.floor(10000 + Math.random() * 90000).toString()
-  
   const createTime = new Date().toLocaleDateString('zh-CN')
   
-  // 事务插入数据
   db.run('BEGIN TRANSACTION')
   
   db.run(
@@ -77,7 +84,6 @@ app.post('/family/create', (req, res) => {
           
           db.run('COMMIT')
           
-          // 查询刚创建的家庭组
           getGroupByCode(code, (group) => {
             res.json({ code: 200, message: '创建成功', data: group })
           })
@@ -112,26 +118,22 @@ app.post('/family/join', (req, res) => {
     return res.json({ code: 400, message: '参数错误', data: null })
   }
   
-  // 检查家庭组是否存在
   db.get('SELECT * FROM family_groups WHERE code = ?', [code], (err, group) => {
     if (err || !group) {
       return res.json({ code: 404, message: '邀请码不存在', data: null })
     }
     
-    // 检查是否已加入
     db.get(
       'SELECT * FROM family_members WHERE group_code = ? AND user_id = ?',
       [code, userId],
       (err, member) => {
         if (member) {
-          // 查询完整家庭组信息
           getGroupByCode(code, (fullGroup) => {
             res.json({ code: 400, message: '您已在该家庭组', data: fullGroup })
           })
           return
         }
         
-        // 添加成员
         db.run(
           'INSERT INTO family_members (group_code, user_id, identity, join_time) VALUES (?, ?, ?, ?)',
           [code, userId, identity || '家庭成员', new Date().toLocaleDateString('zh-CN')],
@@ -150,7 +152,6 @@ app.post('/family/join', (req, res) => {
   })
 })
 
-// 辅助函数：获取家庭组完整信息
 const getGroupByCode = (code, callback) => {
   db.get('SELECT * FROM family_groups WHERE code = ?', [code], (err, group) => {
     if (!group) {
@@ -173,7 +174,6 @@ const getGroupByCode = (code, callback) => {
   })
 }
 
-// 健康检查
 app.get('/', (req, res) => {
   res.send('🎉 生活助手服务器运行中！')
 })
