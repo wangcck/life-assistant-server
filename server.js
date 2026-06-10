@@ -1,280 +1,187 @@
 const express = require('express')
 const bodyParser = require('body-parser')
 const cors = require('cors')
+const sqlite3 = require('sqlite3').verbose()
 
 const app = express()
-
-// 使用环境变量获取端口，Vercel会自动设置
 const port = process.env.PORT || 3002
 
 app.use(cors())
 app.use(bodyParser.json())
 
-// 添加请求日志
-app.use((req, res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`)
-  next()
-})
-
-// 使用内存存储
-const users = []
-let tokenCounter = 1
-const familyGroups = {}
-
-const generateFamilyCode = () => {
-  return Math.floor(10000 + Math.random() * 90000).toString()
-}
-
-app.post('/auth/login', (req, res) => {
-  const { account, password } = req.body
-  
-  const user = users.find(u => u.account === account && u.password === password)
-  
-  if (user) {
-    const token = `token_${tokenCounter++}_${Date.now()}`
-    res.json({
-      code: 200,
-      message: '登录成功',
-      data: {
-        token,
-        user: {
-          id: user.id,
-          account: user.account
-        }
-      }
-    })
+// 创建/连接 SQLite 数据库
+const db = new sqlite3.Database(':memory:', (err) => {
+  if (err) {
+    console.error('Error opening database:', err)
   } else {
-    res.json({
-      code: 401,
-      message: '账号或密码错误',
-      data: null
-    })
+    console.log('Connected to SQLite database')
+    initDatabase()
   }
 })
 
-app.post('/auth/register', (req, res) => {
-  const { account, password } = req.body
+// 初始化数据库表
+const initDatabase = () => {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS family_groups (
+      code TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      create_time TEXT NOT NULL
+    )
+  `)
   
-  if (!account || !password) {
-    return res.json({
-      code: 400,
-      message: '参数错误',
-      data: null
-    })
-  }
-  
-  const exists = users.find(u => u.account === account)
-  
-  if (exists) {
-    return res.json({
-      code: 400,
-      message: '账号已存在',
-      data: null
-    })
-  }
-  
-  const newUser = {
-    id: users.length + 1,
-    account,
-    password
-  }
-  
-  users.push(newUser)
-  
-  res.json({
-    code: 200,
-    message: '注册成功',
-    data: {
-      user: {
-        id: newUser.id,
-        account: newUser.account
-      }
-    }
-  })
-})
-
-app.post('/auth/forgot-password', (req, res) => {
-  const { phone, code, password } = req.body
-  
-  const user = users.find(u => u.account === phone)
-  
-  if (!user) {
-    return res.json({
-      code: 400,
-      message: '账号不存在',
-      data: null
-    })
-  }
-  
-  user.password = password
-  
-  res.json({
-    code: 200,
-    message: '密码修改成功',
-    data: null
-  })
-})
-
-// ============ 家庭组 API ============
+  db.run(`
+    CREATE TABLE IF NOT EXISTS family_members (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_code TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      identity TEXT NOT NULL,
+      join_time TEXT NOT NULL,
+      FOREIGN KEY (group_code) REFERENCES family_groups(code)
+    )
+  `)
+}
 
 // 创建家庭组
 app.post('/family/create', (req, res) => {
   const { name, userId, identity } = req.body
-
+  
   if (!name || !userId) {
-    return res.json({
-      code: 400,
-      message: '参数错误',
-      data: null
-    })
+    return res.json({ code: 400, message: '参数错误', data: null })
   }
 
-  // 生成不重复的邀请码
-  let code = ''
-  let tries = 0
-  do {
-    code = generateFamilyCode()
-    tries++
-  } while (familyGroups[code] && tries < 100)
-
-  const group = {
-    name: name,
-    code: code,
-    members: [{
-      id: userId,
-      identity: identity || '家庭成员',
-      joinTime: new Date().toLocaleDateString('zh-CN')
-    }],
-    createTime: new Date().toLocaleDateString('zh-CN')
-  }
-
-  familyGroups[code] = group
-
-  res.json({
-    code: 200,
-    message: '创建成功',
-    data: group
-  })
+  // 生成5位邀请码
+  const code = Math.floor(10000 + Math.random() * 90000).toString()
+  
+  const createTime = new Date().toLocaleDateString('zh-CN')
+  
+  // 事务插入数据
+  db.run('BEGIN TRANSACTION')
+  
+  db.run(
+    'INSERT INTO family_groups (code, name, create_time) VALUES (?, ?, ?)',
+    [code, name, createTime],
+    (err) => {
+      if (err) {
+        db.run('ROLLBACK')
+        return res.json({ code: 500, message: '创建失败', data: null })
+      }
+      
+      db.run(
+        'INSERT INTO family_members (group_code, user_id, identity, join_time) VALUES (?, ?, ?, ?)',
+        [code, userId, identity || '家庭成员', createTime],
+        (err) => {
+          if (err) {
+            db.run('ROLLBACK')
+            return res.json({ code: 500, message: '创建失败', data: null })
+          }
+          
+          db.run('COMMIT')
+          
+          // 查询刚创建的家庭组
+          getGroupByCode(code, (group) => {
+            res.json({ code: 200, message: '创建成功', data: group })
+          })
+        }
+      )
+    }
+  )
 })
 
-// 查询家庭组（通过邀请码）
+// 查询家庭组
 app.post('/family/get', (req, res) => {
   const { code } = req.body
-
+  
   if (!code) {
-    return res.json({
-      code: 400,
-      message: '邀请码不能为空',
-      data: null
-    })
+    return res.json({ code: 400, message: '邀请码不能为空', data: null })
   }
-
-  const group = familyGroups[code]
-
-  if (!group) {
-    return res.json({
-      code: 404,
-      message: '邀请码不存在',
-      data: null
-    })
-  }
-
-  res.json({
-    code: 200,
-    message: '查询成功',
-    data: group
+  
+  getGroupByCode(code, (group) => {
+    if (group) {
+      res.json({ code: 200, message: '查询成功', data: group })
+    } else {
+      res.json({ code: 404, message: '邀请码不存在', data: null })
+    }
   })
 })
 
 // 加入家庭组
 app.post('/family/join', (req, res) => {
   const { code, userId, identity } = req.body
-
+  
   if (!code || !userId) {
-    return res.json({
-      code: 400,
-      message: '参数错误',
-      data: null
-    })
+    return res.json({ code: 400, message: '参数错误', data: null })
   }
-
-  const group = familyGroups[code]
-
-  if (!group) {
-    return res.json({
-      code: 404,
-      message: '邀请码不存在',
-      data: null
-    })
-  }
-
-  const alreadyMember = group.members.find(m => m.id === userId)
-  if (alreadyMember) {
-    return res.json({
-      code: 400,
-      message: '您已在该家庭组',
-      data: group
-    })
-  }
-
-  group.members.push({
-    id: userId,
-    identity: identity || '家庭成员',
-    joinTime: new Date().toLocaleDateString('zh-CN')
-  })
-
-  familyGroups[code] = group
-
-  res.json({
-    code: 200,
-    message: '加入成功',
-    data: group
+  
+  // 检查家庭组是否存在
+  db.get('SELECT * FROM family_groups WHERE code = ?', [code], (err, group) => {
+    if (err || !group) {
+      return res.json({ code: 404, message: '邀请码不存在', data: null })
+    }
+    
+    // 检查是否已加入
+    db.get(
+      'SELECT * FROM family_members WHERE group_code = ? AND user_id = ?',
+      [code, userId],
+      (err, member) => {
+        if (member) {
+          // 查询完整家庭组信息
+          getGroupByCode(code, (fullGroup) => {
+            res.json({ code: 400, message: '您已在该家庭组', data: fullGroup })
+          })
+          return
+        }
+        
+        // 添加成员
+        db.run(
+          'INSERT INTO family_members (group_code, user_id, identity, join_time) VALUES (?, ?, ?, ?)',
+          [code, userId, identity || '家庭成员', new Date().toLocaleDateString('zh-CN')],
+          (err) => {
+            if (err) {
+              return res.json({ code: 500, message: '加入失败', data: null })
+            }
+            
+            getGroupByCode(code, (fullGroup) => {
+              res.json({ code: 200, message: '加入成功', data: fullGroup })
+            })
+          }
+        )
+      }
+    )
   })
 })
 
-// 退出家庭组
-app.post('/family/leave', (req, res) => {
-  const { code, userId } = req.body
-
-  if (!code || !userId) {
-    return res.json({
-      code: 400,
-      message: '参数错误',
-      data: null
-    })
-  }
-
-  const group = familyGroups[code]
-
-  if (!group) {
-    return res.json({
-      code: 404,
-      message: '邀请码不存在',
-      data: null
-    })
-  }
-
-  group.members = group.members.filter(m => m.id !== userId)
-  familyGroups[code] = group
-
-  res.json({
-    code: 200,
-    message: '退出成功',
-    data: null
+// 辅助函数：获取家庭组完整信息
+const getGroupByCode = (code, callback) => {
+  db.get('SELECT * FROM family_groups WHERE code = ?', [code], (err, group) => {
+    if (!group) {
+      callback(null)
+      return
+    }
+    
+    db.all(
+      'SELECT user_id AS id, identity, join_time FROM family_members WHERE group_code = ?',
+      [code],
+      (err, members) => {
+        callback({
+          name: group.name,
+          code: group.code,
+          members: members || [],
+          createTime: group.create_time
+        })
+      }
+    )
   })
-})
+}
 
-// ============ 健康检查 ============
+// 健康检查
 app.get('/', (req, res) => {
   res.send('🎉 生活助手服务器运行中！')
 })
 
-// Vercel Serverless 模式需要导出 app
 module.exports = app
 
-// 本地开发时运行
 if (require.main === module) {
-  app.listen(port, '0.0.0.0', () => {
-    console.log(`Server running on http://0.0.0.0:${port}`)
+  app.listen(port, () => {
+    console.log(`Server running on http://localhost:${port}`)
   })
 }
