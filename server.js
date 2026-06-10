@@ -16,9 +16,14 @@ app.use((req, res, next) => {
   next()
 })
 
-// 使用内存存储（Vercel Serverless 模式下会重置，但足以演示）
+// 使用内存存储
 const users = []
 let tokenCounter = 1
+const familyGroups = {}
+
+const generateFamilyCode = () => {
+  return Math.floor(10000 + Math.random() * 90000).toString()
+}
 
 app.post('/auth/login', (req, res) => {
   const { account, password } = req.body
@@ -110,6 +115,156 @@ app.post('/auth/forgot-password', (req, res) => {
   })
 })
 
+// ============ 家庭组 API ============
+
+// 创建家庭组
+app.post('/family/create', (req, res) => {
+  const { name, userId, identity } = req.body
+
+  if (!name || !userId) {
+    return res.json({
+      code: 400,
+      message: '参数错误',
+      data: null
+    })
+  }
+
+  // 生成不重复的邀请码
+  let code = ''
+  let tries = 0
+  do {
+    code = generateFamilyCode()
+    tries++
+  } while (familyGroups[code] && tries < 100)
+
+  const group = {
+    name: name,
+    code: code,
+    members: [{
+      id: userId,
+      identity: identity || '家庭成员',
+      joinTime: new Date().toLocaleDateString('zh-CN')
+    }],
+    createTime: new Date().toLocaleDateString('zh-CN')
+  }
+
+  familyGroups[code] = group
+
+  res.json({
+    code: 200,
+    message: '创建成功',
+    data: group
+  })
+})
+
+// 查询家庭组（通过邀请码）
+app.post('/family/get', (req, res) => {
+  const { code } = req.body
+
+  if (!code) {
+    return res.json({
+      code: 400,
+      message: '邀请码不能为空',
+      data: null
+    })
+  }
+
+  const group = familyGroups[code]
+
+  if (!group) {
+    return res.json({
+      code: 404,
+      message: '邀请码不存在',
+      data: null
+    })
+  }
+
+  res.json({
+    code: 200,
+    message: '查询成功',
+    data: group
+  })
+})
+
+// 加入家庭组
+app.post('/family/join', (req, res) => {
+  const { code, userId, identity } = req.body
+
+  if (!code || !userId) {
+    return res.json({
+      code: 400,
+      message: '参数错误',
+      data: null
+    })
+  }
+
+  const group = familyGroups[code]
+
+  if (!group) {
+    return res.json({
+      code: 404,
+      message: '邀请码不存在',
+      data: null
+    })
+  }
+
+  const alreadyMember = group.members.find(m => m.id === userId)
+  if (alreadyMember) {
+    return res.json({
+      code: 400,
+      message: '您已在该家庭组',
+      data: group
+    })
+  }
+
+  group.members.push({
+    id: userId,
+    identity: identity || '家庭成员',
+    joinTime: new Date().toLocaleDateString('zh-CN')
+  })
+
+  familyGroups[code] = group
+
+  res.json({
+    code: 200,
+    message: '加入成功',
+    data: group
+  })
+})
+
+// 退出家庭组
+app.post('/family/leave', (req, res) => {
+  const { code, userId } = req.body
+
+  if (!code || !userId) {
+    return res.json({
+      code: 400,
+      message: '参数错误',
+      data: null
+    })
+  }
+
+  const group = familyGroups[code]
+
+  if (!group) {
+    return res.json({
+      code: 404,
+      message: '邀请码不存在',
+      data: null
+    })
+  }
+
+  group.members = group.members.filter(m => m.id !== userId)
+  familyGroups[code] = group
+
+  res.json({
+    code: 200,
+    message: '退出成功',
+    data: null
+  })
+})
+
+// ============ 健康检查 ============
 app.get('/', (req, res) => {
   res.send('🎉 生活助手服务器运行中！')
 })
